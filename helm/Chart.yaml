@@ -1,0 +1,29 @@
+apiVersion: v2
+name: observability
+description: Logging and metrics of Chance on one small node. Fluent Bit ships container logs to Loki, one plain Prometheus server scrapes the services' /metrics, and Grafana shows both (dashboards and alert rules provisioned from files). Official charts as pinned dependencies, a NetworkPolicy and a smoke test.
+type: application
+# Chart version: bump on every change to the chart. appVersion is the chart's own release label: the four components
+# have four versions of their own (README, "What this repository holds").
+version: 0.1.0
+appVersion: "0.1.0"
+dependencies:
+  # Official charts, one exact version each, never a range. The packaged charts are committed in charts/ and Chart.lock
+  # holds their digest, so the pipeline needs no network for them (README, "Update a chart").
+  # Fluent Bit 5.1.3 (fluent/helm-charts, the Fluent Bit project's own chart).
+  - name: fluent-bit
+    version: 0.58.3
+    repository: https://fluent.github.io/helm-charts
+  # Loki 3.7.9. The chart of the grafana-community repository: the old grafana/helm-charts "loki" chart is now the
+  # Grafana Enterprise Logs chart, and its "grafana" chart is deprecated (README, "What this repository holds").
+  - name: loki
+    version: 21.2.1
+    repository: https://grafana-community.github.io/helm-charts
+  # Prometheus 3.16.0, server only: Alertmanager, Pushgateway, node exporter and kube-state-metrics are switched off in
+  # values.yaml (ADR-036: no operator stack).
+  - name: prometheus
+    version: 29.47.1
+    repository: https://prometheus-community.github.io/helm-charts
+  # Grafana 13.3.1 (grafana-community, the continuation of the deprecated grafana/helm-charts chart).
+  - name: grafana
+    version: 14.4.1
+    repository: https://grafana-community.github.io/helm-charts

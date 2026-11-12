@@ -1,0 +1,118 @@
+{
+  "uid": "chance-red-service",
+  "title": "Chance / RED of one service",
+  "description": "Rate, errors and duration of one service (REQ-20), by route, status and tenant. Pick the service and filter by tenant and route.",
+  "tags": ["chance", "metrics", "red"],
+  "schemaVersion": 41,
+  "version": 1,
+  "editable": false,
+  "graphTooltip": 1,
+  "refresh": "30s",
+  "time": { "from": "now-1h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "service", "label": "Service", "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "query": { "query": "label_values(http_requests_total, service)", "refId": "service" },
+        "definition": "label_values(http_requests_total, service)",
+        "refresh": 2, "sort": 1, "multi": false, "includeAll": false
+      },
+      {
+        "name": "tenant", "label": "Tenant", "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "query": { "query": "label_values(http_requests_total{service=\"$service\"}, tenant)", "refId": "tenant" },
+        "definition": "label_values(http_requests_total{service=\"$service\"}, tenant)",
+        "refresh": 2, "sort": 1, "multi": true, "includeAll": true, "allValue": ".*",
+        "current": { "selected": true, "text": ["All"], "value": ["$__all"] }
+      },
+      {
+        "name": "route", "label": "Route", "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "query": { "query": "label_values(http_requests_total{service=\"$service\", tenant=~\"$tenant\"}, route)", "refId": "route" },
+        "definition": "label_values(http_requests_total{service=\"$service\", tenant=~\"$tenant\"}, route)",
+        "refresh": 2, "sort": 1, "multi": true, "includeAll": true, "allValue": ".*",
+        "current": { "selected": true, "text": ["All"], "value": ["$__all"] }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1, "type": "stat", "title": "Requests per second",
+      "gridPos": { "h": 4, "w": 8, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "refId": "A", "expr": "sum(rate(http_requests_total{service=\"$service\", tenant=~\"$tenant\", route=~\"$route\"}[$__rate_interval]))" } ],
+      "fieldConfig": { "defaults": { "unit": "reqps", "decimals": 2 }, "overrides": [] }
+    },
+    {
+      "id": 2, "type": "stat", "title": "Errors (5xx share of requests)",
+      "gridPos": { "h": 4, "w": 8, "x": 8, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "refId": "A", "expr": "sum(rate(http_requests_total{service=\"$service\", tenant=~\"$tenant\", route=~\"$route\", status_code=~\"5..\"}[$__rate_interval])) / sum(rate(http_requests_total{service=\"$service\", tenant=~\"$tenant\", route=~\"$route\"}[$__rate_interval]))" } ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit", "decimals": 2,
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "orange", "value": 0.01 }, { "color": "red", "value": 0.05 } ] }
+        },
+        "overrides": []
+      },
+      "options": { "colorMode": "background" }
+    },
+    {
+      "id": 3, "type": "stat", "title": "Duration, 95th percentile",
+      "gridPos": { "h": 4, "w": 8, "x": 16, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "refId": "A", "expr": "histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{service=\"$service\", tenant=~\"$tenant\", route=~\"$route\"}[$__rate_interval])))" } ],
+      "fieldConfig": { "defaults": { "unit": "s", "decimals": 3 }, "overrides": [] }
+    },
+    {
+      "id": 4, "type": "timeseries", "title": "Rate: requests per second, by route",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "refId": "A", "legendFormat": "{{method}} {{route}}", "expr": "sum by (method, route) (rate(http_requests_total{service=\"$service\", tenant=~\"$tenant\", route=~\"$route\"}[$__rate_interval]))" } ],
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "fillOpacity": 10, "lineWidth": 1 } }, "overrides": [] }
+    },
+    {
+      "id": 5, "type": "timeseries", "title": "Rate: requests per second, by status code",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "refId": "A", "legendFormat": "{{status_code}}", "expr": "sum by (status_code) (rate(http_requests_total{service=\"$service\", tenant=~\"$tenant\", route=~\"$route\"}[$__rate_interval]))" } ],
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "fillOpacity": 10, "lineWidth": 1 } }, "overrides": [] }
+    },
+    {
+      "id": 6, "type": "timeseries", "title": "Errors: share of 5xx responses, by route",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "refId": "A", "legendFormat": "{{route}}", "expr": "sum by (route) (rate(http_requests_total{service=\"$service\", tenant=~\"$tenant\", route=~\"$route\", status_code=~\"5..\"}[$__rate_interval])) / sum by (route) (rate(http_requests_total{service=\"$service\", tenant=~\"$tenant\", route=~\"$route\"}[$__rate_interval]))" } ],
+      "fieldConfig": { "defaults": { "unit": "percentunit", "custom": { "fillOpacity": 10, "lineWidth": 1 } }, "overrides": [] }
+    },
+    {
+      "id": 7, "type": "timeseries", "title": "Duration: 50th, 95th and 99th percentile",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "legendFormat": "p50", "expr": "histogram_quantile(0.50, sum by (le) (rate(http_request_duration_seconds_bucket{service=\"$service\", tenant=~\"$tenant\", route=~\"$route\"}[$__rate_interval])))" },
+        { "refId": "B", "legendFormat": "p95", "expr": "histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{service=\"$service\", tenant=~\"$tenant\", route=~\"$route\"}[$__rate_interval])))" },
+        { "refId": "C", "legendFormat": "p99", "expr": "histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket{service=\"$service\", tenant=~\"$tenant\", route=~\"$route\"}[$__rate_interval])))" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "fillOpacity": 10, "lineWidth": 1 } }, "overrides": [] }
+    },
+    {
+      "id": 8, "type": "table", "title": "Slowest routes: 95th percentile over the selected time range (the table the optimization starts from)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "refId": "A", "instant": true, "format": "table", "expr": "topk(10, histogram_quantile(0.95, sum by (le, method, route) (rate(http_request_duration_seconds_bucket{service=\"$service\", tenant=~\"$tenant\", route=~\"$route\"}[$__range]))))" } ],
+      "fieldConfig": { "defaults": { "unit": "s", "decimals": 3 }, "overrides": [] },
+      "transformations": [
+        { "id": "organize", "options": { "excludeByName": { "Time": true }, "renameByName": { "Value": "p95 (s)" } } }
+      ]
+    },
+    {
+      "id": 9, "type": "timeseries", "title": "Load by tenant: requests per second",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "refId": "A", "legendFormat": "{{tenant}}", "expr": "sum by (tenant) (rate(http_requests_total{service=\"$service\", tenant=~\"$tenant\", route=~\"$route\"}[$__rate_interval]))" } ],
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "fillOpacity": 10, "lineWidth": 1 } }, "overrides": [] }
+    }
+  ]
+}

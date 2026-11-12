@@ -1,0 +1,465 @@
+# Defaults, the prod sizes (one small node, README "Sizing"). values-dev.yaml and values-prod.yaml override them. This
+# chart builds no image of its own, so the pipeline passes no image values (README, "Deploy").
+#
+# The four components are the official charts, vendored in charts/ (Chart.yaml): everything under the keys fluent-bit,
+# loki, prometheus and grafana below is that chart's values (a chart's full list: `helm show values
+# charts/<name>-<version>.tgz`). Only the values that differ from a chart's defaults are set, each with its reason.
+# The keys outside those four belong to this chart. Everything runs in one namespace, `monitoring` (README, "Namespace").
+
+# The shared workflow passes podAnnotations.checksum/app-env on every deploy that creates the Secret observability-env (the service
+# charts put it on their Pods, so that a changed Secret restarts them). Nothing here carries it: an umbrella chart's top-level value
+# does not reach a subchart, so Grafana does not restart when the admin password changes (README, "Deploy"). The key is declared only
+# so the schema accepts the workflow's flag.
+podAnnotations: {}
+
+# What the chart itself adds (templates/): the provisioning ConfigMaps of Grafana and the NetworkPolicies.
+alerting:
+  # Who gets the alerts. The default contact point is an e-mail contact point; while Grafana has no SMTP server
+  # (grafana.grafana.ini.smtp.enabled is false) a notification cannot be sent, and the alert stays visible as Firing in
+  # Alerting > Alert rules (README, "Alerts"). To e-mail, set grafana.grafana.ini.smtp.
+  # Addresses are not secrets; the SMTP user and password are, and come from the Secret observability-env.
+  emailAddresses: ["chance-alerts@example.invalid"]
+
+# Which Pods may connect inside the namespace: Loki only from Fluent Bit and Grafana, Prometheus only from Grafana, Grafana
+# only from the smoke test (a person uses kubectl port-forward, which does not pass through a NetworkPolicy). Needs a
+# network policy engine in the cluster (plan section 9); without one the objects do nothing. Off here, on in values-prod.yaml.
+networkPolicy:
+  enabled: false
+
+# The smoke test of "helm test": a Pod that asks the three components whether they are up. Pinned by tag and digest.
+smokeTest:
+  image: docker.io/library/busybox:1.37.0@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec
+
+# ---------------------------------------------------------------------------------------------------------------
+# Fluent Bit: a DaemonSet (one Pod per node) that tails the container logs of the namespaces prod, gateway and monitoring, parses
+# the JSON line of each service, adds the Kubernetes metadata and ships to Loki with the labels namespace, app and tenant.
+fluent-bit:
+  fullnameOverride: fluent-bit
+  image:
+    tag: 5.1.3
+    digest: sha256:c5542543523c9678398dd78d927c05e8425ec15b038f226b67b3b019b1a70845
+  # Fluent Bit's own metrics (records read, shipped, retried) for Prometheus, by the same three annotations as the services.
+  podAnnotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "2020"
+    prometheus.io/path: /api/v1/metrics/prometheus
+  # One Pod per node needs little: 4.5 MiB in use at rest in the demo, 16Mi is the request, 96Mi the ceiling for a burst of logs.
+  resources:
+    requests:
+      cpu: 25m
+      memory: 16Mi
+    limits:
+      memory: 96Mi
+  flush: 5
+  testFramework:
+    enabled: false
+  config:
+    # The chart's own [SERVICE] block (Flush, Log_Level, the parsers files and the HTTP server of the metrics and the probes), plus
+    # the buffer on disk: while Loki is away (a restart of its Pod, the first rollout, in which Fluent Bit may start first) the
+    # chunks wait in /var/log/flb-storage on the node, a folder of the volume that is mounted anyway, instead of being dropped.
+    # At most 8 chunks (about 2 MB each) are held in memory; the rest of a backlog stays on disk (bounded by the output below).
+    service: |
+      [SERVICE]
+          Daemon Off
+          Flush {{ .Values.flush }}
+          Log_Level {{ .Values.logLevel }}
+          Parsers_File /fluent-bit/etc/parsers.conf
+          Parsers_File /fluent-bit/etc/conf/custom_parsers.conf
+          HTTP_Server On
+          HTTP_Listen 0.0.0.0
+          HTTP_Port {{ .Values.metricsPort }}
+          Health_Check On
+          storage.path /var/log/flb-storage/
+          storage.sync normal
+          storage.checksum off
+          storage.max_chunks_up 8
+          storage.backlog.mem_limit 5M
+    inputs: |
+      [INPUT]
+          Name tail
+          # File names are <pod>_<namespace>_<container>-<id>.log. To collect another namespace, add its pattern here. The
+          # namespace gateway holds Traefik and the token proxy: the edge's errors, time-outs and failed logins (README, "Namespace").
+          # Fluent Bit's own log is left out (it would log what it ships).
+          Path /var/log/containers/*_prod_*.log,/var/log/containers/*_gateway_*.log,/var/log/containers/*_monitoring_*.log
+          Exclude_Path /var/log/containers/*_monitoring_fluent-bit-*.log
+          # containerd (AKS) writes the CRI format, Docker the json-file format; both are read.
+          multiline.parser docker, cri
+          Tag kube.*
+          storage.type filesystem
+          Mem_Buf_Limit 5MB
+          Skip_Long_Lines On
+          Refresh_Interval 10
+          # Remembers how far each file was read, so a restart of the Pod loses and repeats nothing.
+          DB /var/log/flb_kube.db
+          DB.sync normal
+    filters: |
+      [FILTER]
+          Name kubernetes
+          Match kube.*
+          Kube_URL https://kubernetes.default.svc:443
+          # A line that is a JSON object becomes the fields of the record (level, msg, tenantId, correlationId, ...).
+          # A line that is not JSON (a stack trace, a start-up banner) stays as the text field "log".
+          # The default buffer for the API server's answer is 32 KiB: a Pod object above it (managedFields, many env entries, Keycloak)
+          # would get no metadata and so no namespace or app label. 0 = the buffer grows as the answer needs.
+          Buffer_Size 0
+          Merge_Log On
+          Keep_Log Off
+          Labels On
+          Annotations Off
+          K8S-Logging.Parser Off
+          K8S-Logging.Exclude Off
+      [FILTER]
+          # Lifts the Kubernetes metadata to the top of the record (k8s_pod_name, k8s_labels, ...), so the output can name it.
+          Name nest
+          Match kube.*
+          Operation lift
+          Nested_under kubernetes
+          Add_prefix k8s_
+    outputs: |
+      [OUTPUT]
+          Name loki
+          Match kube.*
+          Host loki
+          Port 3100
+          # Few, stable labels: Loki indexes the labels only, so a label with many values (a correlation id) would make one
+          # stream per value. namespace and app say where a line comes from, tenant is the JSON field tenantId (the label
+          # is left out of a line without it). The rest of the line, correlationId included, is searched, not indexed.
+          Labels job=fluent-bit, namespace=$k8s_namespace_name, app=$k8s_labels['app.kubernetes.io/name'], tenant=$tenantId
+          Remove_Keys k8s_labels,k8s_namespace_name,k8s_pod_id,k8s_docker_id,k8s_container_hash,k8s_container_image,k8s_host
+          Line_Format json
+          # Loki away for longer than five retries (a restart with a disk reattach, the first rollout) must not drop chunks: retry
+          # without a limit, the chunks waiting on disk, at most 100 MB of them (then the oldest go, so a long outage cannot fill the node).
+          Retry_Limit no_limits
+          storage.total_limit_size 100M
+
+# ---------------------------------------------------------------------------------------------------------------
+# Loki: single binary (every part of Loki in one process), filesystem storage on one small claim, a few days of retention.
+loki:
+  fullnameOverride: loki
+  # No multi-tenancy of Loki itself: the tenants of Chance are a label, not Loki tenants.
+  loki:
+    auth_enabled: false
+    image:
+      tag: 3.7.9
+      digest: sha256:0db216b630ae1f348a1584c67f3cead8b4c1fc839169a39501db664744158e28
+    commonConfig:
+      replication_factor: 1
+      # The chart points the compactor's gRPC address at the Service loki:9095: Loki's own call would leave the Pod and come back through
+      # the Service, where a network policy engine that filters it (the policy admits 3100 only) could stop it. One process holds the
+      # compactor, so the address is the Pod itself (README, "Checks": the old address was not seen to fail, the new one works).
+      compactor_grpc_address: localhost:9095
+    storage:
+      type: filesystem
+    schemaConfig:
+      configs:
+        - from: "2024-04-01"
+          store: tsdb
+          object_store: filesystem
+          schema: v13
+          index:
+            prefix: index_
+            period: 24h
+    limits_config:
+      # Retention: three days (README, "Sizing"). The compactor below deletes what is older.
+      retention_period: 72h
+      reject_old_samples: true
+      reject_old_samples_max_age: 72h
+      volume_enabled: true
+      # Protection of the small node: a runaway logger fills the claim before it can fill anything else.
+      ingestion_rate_mb: 4
+      ingestion_burst_size_mb: 8
+      per_stream_rate_limit: 3MB
+    compactor:
+      working_directory: /var/loki/retention
+      retention_enabled: true
+      delete_request_store: filesystem
+      compaction_interval: 10m
+      retention_delete_delay: 2h
+    # The small cache of ADR-035: 50 MB for query results, inside the Loki process. The chart's own caches are memcached Pods that
+    # reserve gigabytes by default; they are switched off below.
+    query_range:
+      cache_results: true
+      results_cache:
+        cache:
+          embedded_cache:
+            enabled: true
+            max_size_mb: 50
+    server:
+      log_level: warn
+    analytics:
+      reporting_enabled: false
+  deploymentMode: SingleBinary
+  singleBinary:
+    replicas: 1
+    # One replica: a PodDisruptionBudget either protects nothing or blocks every node drain (README, "Why no PodDisruptionBudget").
+    podDisruptionBudget:
+      enabled: false
+    persistence:
+      enabled: true
+      size: 2Gi
+    # Request = what it uses with the demo's volume of logs (measured, README "Sizing"); the limit is a ceiling. The chart sets the
+    # Go runtime's soft limit to 85 % of it.
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        memory: 384Mi
+  # Nothing but the single binary: no gateway (Fluent Bit and Grafana talk to the Service loki directly), no canary,
+  # no memcached caches, no scalable or distributed targets.
+  gateway:
+    enabled: false
+  lokiCanary:
+    enabled: false
+  test:
+    enabled: false
+  chunksCache:
+    enabled: false
+  resultsCache:
+    enabled: false
+  monitoring:
+    selfMonitoring:
+      enabled: false
+  sidecar:
+    rules:
+      enabled: false
+  backend:
+    replicas: 0
+  read:
+    replicas: 0
+  write:
+    replicas: 0
+  ingester:
+    replicas: 0
+  querier:
+    replicas: 0
+  queryFrontend:
+    replicas: 0
+  queryScheduler:
+    replicas: 0
+  distributor:
+    replicas: 0
+  compactor:
+    replicas: 0
+  indexGateway:
+    replicas: 0
+  bloomGateway:
+    replicas: 0
+
+# ---------------------------------------------------------------------------------------------------------------
+# Prometheus: the server only (ADR-036): no Alertmanager (Grafana alerts), no Pushgateway, no node exporter, no kube-state-metrics.
+prometheus:
+  alertmanager:
+    enabled: false
+  prometheus-pushgateway:
+    enabled: false
+  prometheus-node-exporter:
+    enabled: false
+  kube-state-metrics:
+    enabled: false
+  configmapReload:
+    prometheus:
+      image:
+        tag: v0.95.2
+        digest: sha256:cc74ddedad4ab1c49446971f6d51302ad4303d8660a2018af925c7f62c114304
+      resources:
+        requests:
+          cpu: 5m
+          memory: 16Mi
+        limits:
+          memory: 32Mi
+  server:
+    fullnameOverride: prometheus-server
+    image:
+      tag: v3.16.0
+      digest: sha256:9332054523223e2ddc18d8101799d54a4a8d823b030c53216f063a6c117773cd
+    global:
+      # 30 s instead of the default 15 s halves the stored samples; a rate over 5 minutes still has ten points.
+      scrape_interval: 30s
+      scrape_timeout: 10s
+      evaluation_interval: 30s
+    # Short retention (the demo needs the last days, not a history): three days or 1 GB, whichever comes first.
+    retention: 3d
+    retentionSize: 1GB
+    persistentVolume:
+      enabled: true
+      size: 2Gi
+    # 45 MiB in use in the demo with about 1 100 series; the estimate for the real services is about 4 000 (README, "Sizing").
+    resources:
+      requests:
+        cpu: 50m
+        memory: 96Mi
+      limits:
+        memory: 384Mi
+  # What is scraped: Prometheus itself, every Pod that carries the three annotations prometheus.io/scrape="true", prometheus.io/port
+  # and prometheus.io/path (the services, on port 9464; Fluent Bit), and the memory and CPU of the containers from the node's
+  # cAdvisor, cut down to the four series the dashboards and the sizing check use. Every other job of the chart is off.
+  scrapeConfigs:
+    prometheus:
+      enabled: true
+    kubernetes-pods:
+      enabled: true
+      relabel_configs:
+        - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+          action: keep
+          regex: "true"
+        - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+          action: replace
+          target_label: __metrics_path__
+          regex: (.+)
+        - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_port, __meta_kubernetes_pod_ip]
+          action: replace
+          regex: (\d+);((([0-9]+?)(\.|$)){4})
+          replacement: $2:$1
+          target_label: __address__
+        - source_labels: [__meta_kubernetes_pod_phase]
+          action: drop
+          regex: Pending|Succeeded|Failed|Completed
+        - source_labels: [__meta_kubernetes_namespace]
+          target_label: namespace
+        - source_labels: [__meta_kubernetes_pod_name]
+          target_label: pod
+        # The service label of the dashboards: the chart name that every service chart puts on its Pods.
+        - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+          target_label: service
+    kubernetes-nodes-cadvisor:
+      enabled: true
+      metric_relabel_configs:
+        - source_labels: [__name__]
+          action: keep
+          regex: container_(memory_working_set_bytes|cpu_usage_seconds_total|network_receive_bytes_total|network_transmit_bytes_total)
+        - source_labels: [container]
+          action: drop
+          regex: ""
+    kubernetes-api-servers:
+      enabled: false
+    kubernetes-nodes:
+      enabled: false
+    kubernetes-service-endpoints:
+      enabled: false
+    kubernetes-service-endpoints-slow:
+      enabled: false
+    prometheus-pushgateway:
+      enabled: false
+    kubernetes-services:
+      enabled: false
+    kubernetes-pods-slow:
+      enabled: false
+
+# ---------------------------------------------------------------------------------------------------------------
+# Grafana: shared by logs and metrics. Datasources, dashboards and alert rules are provisioned from files, so a pod that
+# restarts or a new cluster needs no clicking and nothing is kept on a disk.
+grafana:
+  fullnameOverride: grafana
+  image:
+    tag: 13.3.1-distroless
+    sha: 54e297ac67e2b72572f926892f4e06074dc4f79f2a56ed9a9ca9a88a46f28733
+  testFramework:
+    enabled: false
+  # The chart's ClusterRole is for the sidecars that read ConfigMaps of other namespaces; none runs here.
+  rbac:
+    create: false
+  # The admin user and password come from the Secret observability-env, which the pipeline creates from the organization secret
+  # OBSERVABILITY_ENV (keys admin-user and admin-password). Never a password in these files; the schema refuses one.
+  admin:
+    existingSecret: observability-env
+    userKey: admin-user
+    passwordKey: admin-password
+  # ClusterIP, never an Ingress: Grafana is opened with kubectl port-forward (README, "Open Grafana").
+  service:
+    type: ClusterIP
+    port: 80
+  # Nothing is stored: dashboards and rules are files, the datasources are provisioned.
+  persistence:
+    enabled: false
+  # Measured in the compose demo: 277 MiB in use at rest, so the first guess of 320 Mi was too tight; the request is the measured
+  # use rounded up, the limit leaves a margin for dashboards and alert evaluation.
+  resources:
+    requests:
+      cpu: 50m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+  # The optional SMTP credentials of the e-mail contact point (README, "Alerts"): read from the same Secret when the keys exist.
+  envValueFrom:
+    GF_SMTP_USER:
+      secretKeyRef:
+        name: observability-env
+        key: smtp-user
+        optional: true
+    GF_SMTP_PASSWORD:
+      secretKeyRef:
+        name: observability-env
+        key: smtp-password
+        optional: true
+  datasources:
+    datasources.yaml:
+      apiVersion: 1
+      deleteDatasources:
+        - name: Prometheus
+          orgId: 1
+        - name: Loki
+          orgId: 1
+      datasources:
+        - name: Prometheus
+          uid: prometheus
+          type: prometheus
+          access: proxy
+          url: http://prometheus-server:80
+          isDefault: true
+          editable: false
+          jsonData:
+            timeInterval: 30s
+        - name: Loki
+          uid: loki
+          type: loki
+          access: proxy
+          url: http://loki:3100
+          editable: false
+          jsonData:
+            maxLines: 1000
+  # The dashboards are the files in helm/dashboards/, put into the ConfigMap chance-dashboards by templates/dashboards.yaml.
+  dashboardProviders:
+    dashboardproviders.yaml:
+      apiVersion: 1
+      providers:
+        - name: chance
+          orgId: 1
+          folder: Chance
+          type: file
+          disableDeletion: true
+          allowUiUpdates: false
+          updateIntervalSeconds: 60
+          options:
+            path: /var/lib/grafana/dashboards/chance
+  dashboardsConfigMaps:
+    chance: chance-dashboards
+  # The alert rules, contact point and notification policy: the ConfigMap chance-alerting (templates/alerting.yaml).
+  extraConfigmapMounts:
+    - name: chance-alerting
+      mountPath: /etc/grafana/provisioning/alerting
+      configMap: chance-alerting
+      readOnly: true
+  grafana.ini:
+    analytics:
+      reporting_enabled: false
+      check_for_updates: false
+      check_for_plugin_updates: false
+    news:
+      news_feed_enabled: false
+    security:
+      disable_gravatar: true
+    users:
+      allow_sign_up: false
+    unified_alerting:
+      enabled: true
+    alerting:
+      enabled: false
+    # JSON lines on stdout, like the services: Fluent Bit ships Grafana's own log, so a failed notification can be found in Loki.
+    log:
+      mode: console
+    log.console:
+      format: json
+    # E-mail is off until an SMTP server is configured (README, "Alerts"): host, from_address, then enabled.
+    smtp:
+      enabled: false

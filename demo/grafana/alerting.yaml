@@ -1,0 +1,19 @@
+# The same contact point and notification policy as the chart (helm/templates/alerting.yaml). No SMTP server is configured, so a
+# notification cannot be sent, and the alert shows as Firing in Alerting > Alert rules (the log text of the failed send was not captured).
+apiVersion: 1
+contactPoints:
+  - orgId: 1
+    name: chance-alerts
+    receivers:
+      - uid: chance-alerts-email
+        type: email
+        settings:
+          addresses: "chance-alerts@example.invalid"
+          singleEmail: true
+policies:
+  - orgId: 1
+    receiver: chance-alerts
+    group_by: ["alertname", "service"]
+    group_wait: 30s
+    group_interval: 5m
+    repeat_interval: 4h

@@ -1,0 +1,5 @@
+# Pipeline, chart and local run definitions change what runs in prod (every log line and metric of every service passes through them): the other team member reviews them.
+/.github/ @radov02 @DominikkMaximus
+/helm/ @radov02 @DominikkMaximus
+/compose.yaml @radov02 @DominikkMaximus
+/demo/ @radov02 @DominikkMaximus

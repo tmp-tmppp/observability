@@ -1,0 +1,130 @@
+# Alert rules of Grafana (provisioned; REQ-19 and REQ-20). Copied as it is into the ConfigMap chance-alerting, so the
+# placeholders of Grafana's own templates below (the labels of the alert) are not Helm's business. The datasource uids loki and
+# prometheus are set in values.yaml.
+# Contact point and notification policy: templates/alerting.yaml. Every rule is a chain: A (the query), B (reduce to one
+# number), C (the threshold that decides).
+apiVersion: 1
+groups:
+  - orgId: 1
+    name: chance-logs
+    folder: Chance
+    interval: 1m
+    rules:
+      # REQ-19: an alert on a pattern in the logs. WithdrawalFailed is the event payments publishes when a withdrawal could not be
+      # paid out and the credits must be refunded (plan 8, FL-C); a line that names it fires the alert within a minute.
+      # Which line that is today: payments only writes the event to its outbox and logs no line with the name. The line that matches
+      # is the info line of trading's consumer of the event ("A payment event was handled", eventType ...WithdrawalFailed.v1). So the
+      # alert depends on trading consuming the event and on trading's log level staying at info; payments logging a warning when it
+      # settles a failed payout would remove both (README, "Alerts", open item). The rule watches the namespace prod only: Grafana's own
+      # lines are in monitoring, so the alert cannot fire on itself. How to trigger it for a demo: README, "Alerts".
+      - uid: chance-withdrawal-failed
+        title: WithdrawalFailed in the logs
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: loki
+            model:
+              refId: A
+              datasource:
+                type: loki
+                uid: loki
+              expr: sum(count_over_time({namespace="prod"} |= "WithdrawalFailed" [5m]))
+              queryType: instant
+              editorMode: code
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+              datasource:
+                type: __expr__
+                uid: __expr__
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [0]
+              datasource:
+                type: __expr__
+                uid: __expr__
+        # No line in the last five minutes is the normal case: the query then returns nothing, which is "OK", not an error.
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        annotations:
+          summary: A withdrawal failed (WithdrawalFailed in the logs of the last 5 minutes)
+          description: Open the dashboard Chance / Logs, filter on the correlation id of the line, and follow the withdrawal through payments, trading and audit.
+        labels:
+          severity: warning
+          # The service that owns the event (the notification policy groups by it), not the one whose log line matched.
+          service: payments
+  - orgId: 1
+    name: chance-metrics
+    folder: Chance
+    interval: 1m
+    rules:
+      # REQ-20: an alert on the metrics. The share of requests that end in a 5xx status, per service, over 5 minutes; a service
+      # that takes less than one request in 20 seconds is left out, so a single failed request on an idle service does not fire.
+      - uid: chance-error-rate
+        title: A service answers with errors
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              datasource:
+                type: prometheus
+                uid: prometheus
+              expr: (sum by (service) (rate(http_requests_total{status_code=~"5.."}[5m])) / sum by (service) (rate(http_requests_total[5m]))) and (sum by (service) (rate(http_requests_total[5m])) > 0.05)
+              instant: true
+              range: false
+              editorMode: code
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+              datasource:
+                type: __expr__
+                uid: __expr__
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [0.05]
+              datasource:
+                type: __expr__
+                uid: __expr__
+        noDataState: OK
+        execErrState: Error
+        for: 2m
+        annotations:
+          summary: '{{ $labels.service }} answers more than 5 % of its requests with a 5xx status'
+          description: Open the dashboard Chance / RED of one service, pick {{ $labels.service }}, and read the errors by route; then the dashboard Chance / Logs for the lines.
+        labels:
+          severity: warning

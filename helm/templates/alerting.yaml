@@ -1,0 +1,32 @@
+# Grafana's provisioned alerting: the alert rules (the file helm/alerting/rules.yaml, copied as it is, so the placeholders of
+# Grafana's own templates in it stay untouched), the contact point and the
+# notification policy. Mounted at /etc/grafana/provisioning/alerting by grafana.extraConfigmapMounts.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: chance-alerting
+  labels:
+    {{- include "observability.labels" . | nindent 4 }}
+data:
+  rules.yaml: |-
+    {{- .Files.Get "alerting/rules.yaml" | nindent 4 }}
+  contactpoints.yaml: |
+    apiVersion: 1
+    contactPoints:
+      - orgId: 1
+        name: chance-alerts
+        receivers:
+          - uid: chance-alerts-email
+            type: email
+            settings:
+              addresses: {{ join ";" .Values.alerting.emailAddresses | quote }}
+              singleEmail: true
+  policies.yaml: |
+    apiVersion: 1
+    policies:
+      - orgId: 1
+        receiver: chance-alerts
+        group_by: ["alertname", "service"]
+        group_wait: 30s
+        group_interval: 5m
+        repeat_interval: 4h

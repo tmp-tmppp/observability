@@ -1,0 +1,140 @@
+{
+  "uid": "chance-red-overview",
+  "title": "Chance / RED overview",
+  "description": "Rate, errors and duration of every service side by side (REQ-20), from the metrics of the services (GET /metrics on port 9464) and the memory and CPU of their containers.",
+  "tags": ["chance", "metrics", "red"],
+  "schemaVersion": 41,
+  "version": 1,
+  "editable": false,
+  "graphTooltip": 1,
+  "refresh": "30s",
+  "time": { "from": "now-1h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "service", "label": "Service", "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "query": { "query": "label_values(http_requests_total, service)", "refId": "service" },
+        "definition": "label_values(http_requests_total, service)",
+        "refresh": 2, "sort": 1, "multi": true, "includeAll": true, "allValue": ".*",
+        "current": { "selected": true, "text": ["All"], "value": ["$__all"] }
+      },
+      {
+        "name": "tenant", "label": "Tenant", "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "query": { "query": "label_values(http_requests_total{service=~\"$service\"}, tenant)", "refId": "tenant" },
+        "definition": "label_values(http_requests_total{service=~\"$service\"}, tenant)",
+        "refresh": 2, "sort": 1, "multi": true, "includeAll": true, "allValue": ".*",
+        "current": { "selected": true, "text": ["All"], "value": ["$__all"] }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1, "type": "stat", "title": "Requests per second",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "refId": "A", "expr": "sum(rate(http_requests_total{service=~\"$service\", tenant=~\"$tenant\"}[$__rate_interval]))" } ],
+      "fieldConfig": { "defaults": { "unit": "reqps", "decimals": 2 }, "overrides": [] }
+    },
+    {
+      "id": 2, "type": "stat", "title": "Errors (5xx share of requests)",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "refId": "A", "expr": "sum(rate(http_requests_total{service=~\"$service\", tenant=~\"$tenant\", status_code=~\"5..\"}[$__rate_interval])) / sum(rate(http_requests_total{service=~\"$service\", tenant=~\"$tenant\"}[$__rate_interval]))" } ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit", "decimals": 2,
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "orange", "value": 0.01 }, { "color": "red", "value": 0.05 } ] }
+        },
+        "overrides": []
+      },
+      "options": { "colorMode": "background" }
+    },
+    {
+      "id": 3, "type": "stat", "title": "Duration, 95th percentile",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "refId": "A", "expr": "histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{service=~\"$service\", tenant=~\"$tenant\"}[$__rate_interval])))" } ],
+      "fieldConfig": { "defaults": { "unit": "s", "decimals": 3 }, "overrides": [] }
+    },
+    {
+      "id": 4, "type": "stat", "title": "Services that are scraped (up)",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "refId": "A", "expr": "count(up{service=~\"$service\"} == 1)" } ],
+      "fieldConfig": { "defaults": { "unit": "none", "decimals": 0 }, "overrides": [] }
+    },
+    {
+      "id": 5, "type": "timeseries", "title": "Rate: requests per second, by service",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "refId": "A", "legendFormat": "{{service}}", "expr": "sum by (service) (rate(http_requests_total{service=~\"$service\", tenant=~\"$tenant\"}[$__rate_interval]))" } ],
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "fillOpacity": 10, "lineWidth": 1 } }, "overrides": [] }
+    },
+    {
+      "id": 6, "type": "timeseries", "title": "Errors: 5xx responses per second, by service",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "refId": "A", "legendFormat": "{{service}}", "expr": "sum by (service) (rate(http_requests_total{service=~\"$service\", tenant=~\"$tenant\", status_code=~\"5..\"}[$__rate_interval]))" } ],
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "fillOpacity": 10, "lineWidth": 1 } }, "overrides": [] }
+    },
+    {
+      "id": 7, "type": "timeseries", "title": "Duration: 95th percentile, by service",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "refId": "A", "legendFormat": "{{service}}", "expr": "histogram_quantile(0.95, sum by (le, service) (rate(http_request_duration_seconds_bucket{service=~\"$service\", tenant=~\"$tenant\"}[$__rate_interval])))" } ],
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "fillOpacity": 10, "lineWidth": 1 } }, "overrides": [] }
+    },
+    {
+      "id": 8, "type": "timeseries", "title": "Load by tenant: requests per second",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "refId": "A", "legendFormat": "{{tenant}}", "expr": "sum by (tenant) (rate(http_requests_total{service=~\"$service\", tenant=~\"$tenant\"}[$__rate_interval]))" } ],
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "fillOpacity": 10, "lineWidth": 1 } }, "overrides": [] }
+    },
+    {
+      "id": 9, "type": "row", "title": "Resources of the containers in the namespace prod (the check of the requests and limits, README \"Sizing\")",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 20 }, "collapsed": false, "panels": []
+    },
+    {
+      "id": 10, "type": "timeseries", "title": "Memory in use (working set), by pod",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 21 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "refId": "A", "legendFormat": "{{pod}}", "expr": "sum by (pod) (container_memory_working_set_bytes{namespace=\"prod\"})" } ],
+      "fieldConfig": { "defaults": { "unit": "bytes", "custom": { "fillOpacity": 10, "lineWidth": 1 } }, "overrides": [] }
+    },
+    {
+      "id": 11, "type": "timeseries", "title": "CPU in use (cores), by pod",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 21 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "refId": "A", "legendFormat": "{{pod}}", "expr": "sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=\"prod\"}[$__rate_interval]))" } ],
+      "fieldConfig": { "defaults": { "unit": "cores", "custom": { "fillOpacity": 10, "lineWidth": 1 } }, "overrides": [] }
+    },
+    {
+      "id": 12, "type": "row", "title": "The edge and the identity service (Traefik and Keycloak publish their own metric names, not http_requests_total; the rows above do not count them)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 29 }, "collapsed": false, "panels": []
+    },
+    {
+      "id": 13, "type": "timeseries", "title": "Edge (Traefik): requests per second, by status code",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 30 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "refId": "A", "legendFormat": "{{code}}", "expr": "sum by (code) (rate(traefik_entrypoint_requests_total[$__rate_interval]))" } ],
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "fillOpacity": 10, "lineWidth": 1 } }, "overrides": [] }
+    },
+    {
+      "id": 14, "type": "timeseries", "title": "Edge (Traefik): duration, 95th percentile",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 30 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "refId": "A", "legendFormat": "p95", "expr": "histogram_quantile(0.95, sum by (le) (rate(traefik_entrypoint_request_duration_seconds_bucket[$__rate_interval])))" } ],
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "fillOpacity": 10, "lineWidth": 1 } }, "overrides": [] }
+    },
+    {
+      "id": 15, "type": "timeseries", "title": "Identity (Keycloak): requests per second, by status",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 30 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "refId": "A", "legendFormat": "{{status}}", "expr": "sum by (status) (rate(http_server_requests_seconds_count[$__rate_interval]))" } ],
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "fillOpacity": 10, "lineWidth": 1 } }, "overrides": [] }
+    }
+  ]
+}

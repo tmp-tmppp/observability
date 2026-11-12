@@ -1,0 +1,25 @@
+# Prometheus for the compose demo. On a cluster the targets are found by the three Pod annotations (helm/values.yaml,
+# prometheus.scrapeConfigs); here they are listed. The label service is what the annotation-based job takes from the Pod's
+# chart name, so the dashboards (which group by service) work unchanged.
+global:
+  scrape_interval: 15s # the cluster uses 30 s; shorter here so that a demo shows something sooner
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  - job_name: chance-services
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["demo-service:9464"]
+        labels:
+          service: demo-service
+          namespace: prod
+      # A real service of Chance running on this machine (its METRICS_PORT is 9464), instead of the demo service: uncomment, and
+      # change the label service to the service's chart name (markets, trading, ...).
+      # - targets: ["host.docker.internal:9464"]
+      #   labels:
+      #     service: markets
+      #     namespace: prod

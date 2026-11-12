@@ -1,0 +1,15 @@
+# Weekly update pull requests for the GitHub Actions used by the workflows; minor and patch updates come as one pull request.
+# Not covered, on purpose: the four charts (helm/Chart.yaml), the images pinned in helm/values.yaml and the images of compose.yaml.
+# A chart bump must also replace the packaged chart in helm/charts/ and Chart.lock (a manual "helm dependency update"), and the
+# images are the app versions of the charts, so they move together with the chart by hand (README, "Update a chart").
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions-minor-and-patch:
+        update-types:
+          - minor
+          - patch

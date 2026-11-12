@@ -1,0 +1,15 @@
+# Dev overrides (a local cluster): smaller claims, shorter retention, no NetworkPolicy (a local cluster rarely has an engine).
+loki:
+  loki:
+    limits_config:
+      retention_period: 24h
+      reject_old_samples_max_age: 24h
+  singleBinary:
+    persistence:
+      size: 1Gi
+prometheus:
+  server:
+    retention: 1d
+    retentionSize: 512MB
+    persistentVolume:
+      size: 1Gi

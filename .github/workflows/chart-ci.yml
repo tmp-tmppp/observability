@@ -1,0 +1,116 @@
+# The checks of the observability stack itself, next to the organization's service pipeline (RSO-ekipa10/.github, service-ci-cd.yml),
+# which ci-cd.yml calls with build-image: false and which also deploys the chart. The shared workflow does not know this stack, so
+# this file keeps what only it needs: workflow lint, the dependency check (four official charts, each one exact version and vendored),
+# strict chart lint, the rendered manifests against the Kubernetes schemas of the cluster version, the refusals of the values schema
+# and the rules of the stack. Nothing here deploys; how the stack gets to the cluster is in README.md, "Deploy".
+#
+# Called by ci-cd.yml from a job with the id "chart-rules", so the check is named "chart-rules / test". Rename the job id only together
+# with the branch ruleset. Every action is pinned to a full commit SHA (the same SHAs as the organization's workflow).
+name: chart-ci
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  HELM_VERSION: v4.3.1 # Helm 4 (ADR-047), as in the organization's workflow
+  ACTIONLINT_IMAGE: docker.io/rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+  KUBECONFORM_IMAGE: ghcr.io/yannh/kubeconform:v0.8.0@sha256:faffaf43f95aa6425306e1ab8d6fcad72acb9049158f38e574c085ea1ec0f64e
+  KUBERNETES_VERSION: 1.35.0 # schema version of the kinds: the minor version of the cluster
+  NAMESPACE: monitoring
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Workflow lint (actionlint, includes shellcheck)
+        run: docker run --rm -v "$PWD":/repo -w /repo "$ACTIONLINT_IMAGE" -color
+
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Helm is version 4
+        run: |
+          helm version --short
+          [[ "$(helm version --short)" == v4.* ]] || { echo "::error::expected Helm 4 ($HELM_VERSION)"; exit 1; }
+
+      - name: The four charts are pinned to one exact version and vendored (no network needed)
+        run: |
+          # An exact version has digits and dots only: a range (^2.15, ~2.15, >=2, 2.x, *) fails here.
+          if grep -E '^[[:space:]]+version:[[:space:]]*"?[^0-9[:space:]]|^[[:space:]]+version:[[:space:]]*"?[0-9.]*[^0-9."[:space:]]' helm/Chart.yaml; then
+            echo "::error::helm/Chart.yaml: every dependency version must be one exact version, not a range"; exit 1
+          fi
+          # Status "ok" = the packaged chart in helm/charts/ matches Chart.yaml; "missing" or "wrong version" = run
+          # "helm dependency update helm" once and commit helm/charts/ and helm/Chart.lock (README, "Update a chart").
+          helm dependency list helm | tee deps.txt
+          [[ "$(grep -c -E '[[:space:]]ok[[:space:]]*$' deps.txt)" == "4" ]] || { echo "::error::the four dependencies are not all vendored in helm/charts/ or do not match Chart.yaml"; exit 1; }
+          # The lock file names the same versions as Chart.yaml.
+          for name in fluent-bit loki prometheus grafana; do
+            pinned=$(grep -A1 -E "^[[:space:]]*-[[:space:]]*name:[[:space:]]*$name\$" helm/Chart.yaml | grep -E 'version:' | head -n 1 | tr -d ' "' | cut -d: -f2)
+            locked=$(grep -A2 -E "^-[[:space:]]*name:[[:space:]]*$name\$" helm/Chart.lock | grep -E 'version:' | head -n 1 | tr -d ' "' | cut -d: -f2)
+            [[ -n "$pinned" && "$pinned" == "$locked" ]] || { echo "::error::$name: Chart.yaml pins '$pinned' but Chart.lock has '$locked'"; exit 1; }
+          done
+
+      - name: Chart lint (default, dev and prod values)
+        run: |
+          helm lint helm --namespace "$NAMESPACE" --strict
+          helm lint helm --namespace "$NAMESPACE" --strict -f helm/values-dev.yaml
+          helm lint helm --namespace "$NAMESPACE" --strict -f helm/values-prod.yaml
+
+      - name: Manifests match the Kubernetes schemas (dev and prod values)
+        run: |
+          for values in dev prod; do
+            echo "::group::observability chart, $values values"
+            helm template observability helm --namespace "$NAMESPACE" -f "helm/values-$values.yaml" > "render-$values.yaml"
+            docker run --rm -i "$KUBECONFORM_IMAGE" -strict -summary -kubernetes-version "$KUBERNETES_VERSION" - < "render-$values.yaml"
+            echo "::endgroup::"
+          done
+
+      - name: The values schema refuses what it must (a password, a public Service, Alertmanager, a renamed Service, ...)
+        run: bash scripts/schema-refusals.sh
+
+      - name: Provisioning files are valid (dashboards are JSON, alert rules are YAML)
+        run: |
+          for f in helm/dashboards/*.json; do jq empty "$f" && echo "ok $f"; done
+          ruby -ryaml -e 'ARGV.each { |f| YAML.load_file(f); puts "ok #{f}" }' helm/alerting/rules.yaml demo/grafana/alerting.yaml demo/prometheus.yml demo/loki.yaml compose.yaml
+
+      - name: Rules of the stack (what the plan and the services rely on)
+        run: |
+          fail() { echo "::error::$1"; exit 1; }
+          for values in dev prod; do
+            file="render-$values.yaml"
+            # Nothing is reachable from outside the cluster: ClusterIP only, no Ingress, no node port, no host port or host network.
+            if grep -n -E 'type: (LoadBalancer|NodePort)|nodePort:|hostPort:|hostNetwork: true|^kind: Ingress|^kind: HTTPRoute' "$file"; then fail "$values: part of the stack is exposed outside the cluster"; fi
+            # No Secret in the render: the admin password comes from the Secret that the pipeline creates (observability-env).
+            if grep -n -E '^kind: Secret' "$file"; then fail "$values: the chart creates a Secret; credentials must come from the pipeline's Secret"; fi
+            grep -q -E 'secretKeyRef:' "$file" || fail "$values: Grafana does not read its admin password from a Secret"
+            # The four components, and only them: no Alertmanager, Pushgateway, node exporter, kube-state-metrics or memcached.
+            for kind in 'DaemonSet' 'StatefulSet'; do grep -q -E "^kind: $kind\$" "$file" || fail "$values: no $kind rendered"; done
+            [[ "$(grep -c -E '^kind: (Deployment|StatefulSet|DaemonSet)$' "$file")" == "4" ]] || fail "$values: expected exactly four workloads (Fluent Bit, Loki, Prometheus, Grafana)"
+            if grep -n -i -E 'image: .*(alertmanager|pushgateway|node-exporter|kube-state-metrics|memcached)' "$file"; then fail "$values: an extra component is rendered"; fi
+            # Loki keeps its logs on a claim; Prometheus its samples.
+            grep -q -E 'volumeClaimTemplates:' "$file" || fail "$values: Loki has no PersistentVolumeClaim"
+            grep -q -E '^kind: PersistentVolumeClaim$' "$file" || fail "$values: Prometheus has no PersistentVolumeClaim"
+            # The Service names that the datasources and the smoke test use.
+            for svc in loki prometheus-server grafana; do grep -q -E "^  name: \"?$svc\"?\$" "$file" || fail "$values: no object called $svc"; done
+            # The three dashboards and the alert rules are in the ConfigMaps.
+            for f in red-overview.json red-service.json logs.json; do grep -q -E "^  $f: " "$file" || fail "$values: dashboard $f is not in the ConfigMap"; done
+            grep -q -E 'chance-withdrawal-failed' "$file" || fail "$values: the WithdrawalFailed alert rule is missing"
+            grep -q -E 'chance-error-rate' "$file" || fail "$values: the error-rate alert rule is missing"
+            # Every container has a memory request and limit.
+            grep -q -E 'helm\.sh/hook"?:[[:space:]]*"?test' "$file" || fail "$values: the chart has no helm test hook (templates/tests/)"
+          done
+          # Prod switches the NetworkPolicies on.
+          [[ "$(grep -c -E '^kind: NetworkPolicy$' render-prod.yaml)" == "3" ]] || fail "prod: expected three NetworkPolicies"

@@ -1,0 +1,14 @@
+# The dashboards of Grafana: every file in helm/dashboards/ becomes a key of this ConfigMap, mounted by the Grafana chart
+# (grafana.dashboardsConfigMaps) and read by the file provider "chance" (folder Chance). The JSON is copied as it is:
+# Grafana's own double-brace legends and $variables inside it are not Helm's business, because .Files.Get does not run templates.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: chance-dashboards
+  labels:
+    {{- include "observability.labels" . | nindent 4 }}
+data:
+  {{- range $path, $_ := .Files.Glob "dashboards/*.json" }}
+  {{ base $path }}: |-
+    {{- $.Files.Get $path | nindent 4 }}
+  {{- end }}

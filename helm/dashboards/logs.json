@@ -1,0 +1,82 @@
+{
+  "uid": "chance-logs",
+  "title": "Chance / Logs",
+  "description": "The logs of all services and of the edge (REQ-19): namespace prod (the services) and gateway (Traefik and the token proxy). Filter by namespace, service and tenant (labels), then type a correlation id to follow one business transaction across the services. The correlation id is searched in the line, not indexed. The lines of the edge have no tenant label: a chosen tenant leaves them out.",
+  "tags": ["chance", "logs"],
+  "schemaVersion": 41,
+  "version": 1,
+  "editable": false,
+  "graphTooltip": 1,
+  "refresh": "30s",
+  "time": { "from": "now-1h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "namespace", "label": "Namespace", "type": "custom",
+        "description": "prod: the services; gateway: Traefik and the token proxy (the edge); monitoring: the stack itself",
+        "query": "prod,gateway,monitoring",
+        "options": [
+          { "selected": true, "text": "prod", "value": "prod" },
+          { "selected": true, "text": "gateway", "value": "gateway" },
+          { "selected": false, "text": "monitoring", "value": "monitoring" }
+        ],
+        "multi": true, "includeAll": false,
+        "current": { "selected": true, "text": ["prod", "gateway"], "value": ["prod", "gateway"] }
+      },
+      {
+        "name": "app", "label": "Service", "type": "query",
+        "datasource": { "type": "loki", "uid": "loki" },
+        "query": "label_values({namespace=~\"$namespace\"}, app)",
+        "definition": "label_values({namespace=~\"$namespace\"}, app)",
+        "refresh": 2, "sort": 1, "multi": true, "includeAll": true, "allValue": ".+",
+        "current": { "selected": true, "text": ["All"], "value": ["$__all"] }
+      },
+      {
+        "name": "tenant", "label": "Tenant", "type": "query",
+        "datasource": { "type": "loki", "uid": "loki" },
+        "query": "label_values({namespace=~\"$namespace\"}, tenant)",
+        "definition": "label_values({namespace=~\"$namespace\"}, tenant)",
+        "refresh": 2, "sort": 1, "multi": true, "includeAll": true, "allValue": ".*",
+        "current": { "selected": true, "text": ["All"], "value": ["$__all"] }
+      },
+      {
+        "name": "correlationId", "label": "Correlation id", "type": "textbox",
+        "query": "", "current": { "selected": false, "text": "", "value": "" }
+      },
+      {
+        "name": "search", "label": "Text in the line", "type": "textbox",
+        "query": "", "current": { "selected": false, "text": "", "value": "" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1, "type": "timeseries", "title": "Log lines per second, by service",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [ { "refId": "A", "queryType": "range", "legendFormat": "{{app}}", "expr": "sum by (app) (rate({namespace=~\"$namespace\", app=~\"$app\", tenant=~\"$tenant\"}[$__auto]))" } ],
+      "fieldConfig": { "defaults": { "unit": "none", "custom": { "fillOpacity": 10, "lineWidth": 1 } }, "overrides": [] }
+    },
+    {
+      "id": 2, "type": "timeseries", "title": "Error lines per second, by service (level error or fatal)",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [ { "refId": "A", "queryType": "range", "legendFormat": "{{app}}", "expr": "sum by (app) (rate({namespace=~\"$namespace\", app=~\"$app\", tenant=~\"$tenant\"} | json | level=~\"error|fatal|50|60\" [$__auto]))" } ],
+      "fieldConfig": { "defaults": { "unit": "none", "custom": { "fillOpacity": 10, "lineWidth": 1 } }, "overrides": [] }
+    },
+    {
+      "id": 3, "type": "logs", "title": "Logs (filtered by correlation id and text)",
+      "gridPos": { "h": 14, "w": 24, "x": 0, "y": 7 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [ { "refId": "A", "queryType": "range", "expr": "{namespace=~\"$namespace\", app=~\"$app\", tenant=~\"$tenant\"} |= \"$correlationId\" |= \"$search\"" } ],
+      "options": { "showTime": true, "wrapLogMessage": true, "prettifyLogMessage": true, "enableLogDetails": true, "sortOrder": "Descending", "dedupStrategy": "none" }
+    },
+    {
+      "id": 4, "type": "logs", "title": "WithdrawalFailed (the lines the alert rule watches)",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 21 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [ { "refId": "A", "queryType": "range", "expr": "{namespace=\"prod\"} |= \"WithdrawalFailed\"" } ],
+      "options": { "showTime": true, "wrapLogMessage": true, "prettifyLogMessage": true, "enableLogDetails": true, "sortOrder": "Descending", "dedupStrategy": "none" }
+    }
+  ]
+}

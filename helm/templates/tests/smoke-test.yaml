@@ -1,0 +1,62 @@
+# "helm test" after every deploy: asks the three servers whether they are up, from a Pod inside the namespace, by their
+# Service names. Loki answers "ready" on /ready, Prometheus "Prometheus Server is Ready." on /-/ready, Grafana a JSON
+# document with "database": "ok" on /api/health (no login needed). Prometheus must also list at least one target (itself),
+# which proves the configuration loaded. A failure fails the test and the pipeline rolls the release back (ADR-048).
+# The same script was run against the running compose stack before it went in (README, "Checks").
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ .Release.Name }}-smoke-test
+  labels:
+    {{- include "observability.labels" . | nindent 4 }}
+    app.kubernetes.io/component: smoke-test
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: smoke-test
+      image: {{ .Values.smokeTest.image }}
+      command: ["sh", "-c"]
+      args:
+        - |-
+          set -eu
+          get() { wget -q -T 5 -O - "$1"; }
+          # The servers may need a few seconds after the rollout: each check is tried for up to a minute.
+          wait_for() {
+            name="$1"; url="$2"; want="$3"; n=0
+            while :; do
+              if out=$(get "$url" 2>/dev/null) && printf '%s' "$out" | grep -q "$want"; then
+                echo "ok   $name: $url answers '$want'"; return 0
+              fi
+              n=$((n + 1))
+              [ "$n" -lt 12 ] || { echo "FAIL $name: $url did not answer '$want' in 60 s (last answer: $out)"; return 1; }
+              sleep 5
+            done
+          }
+          rc=0
+          wait_for loki http://loki:3100/ready ready || rc=1
+          wait_for prometheus http://prometheus-server:80/-/ready "Ready" || rc=1
+          wait_for grafana http://grafana:80/api/health '"database": "ok"' || rc=1
+          # Prometheus has loaded its configuration and scrapes at least itself.
+          wait_for prometheus-targets http://prometheus-server:80/api/v1/targets '"health":"up"' || rc=1
+          exit "$rc"
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          memory: 32Mi
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]

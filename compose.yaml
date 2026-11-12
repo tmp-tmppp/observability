@@ -1,0 +1,106 @@
+# The four components for a local run, with a demo service that writes the logs and serves the metrics of a Chance service
+# (the conventions of the services: JSON lines on stdout with tenantId and correlationId, GET /metrics on port 9464). The images
+# are the app versions of the vendored charts (Fluent Bit 5.1.3, Loki 3.7.9, Prometheus 3.16.0, Grafana 13.3.1), pinned by tag and
+# digest like in helm/values.yaml; the memory limits are the chart's limits, so what is measured here is what the cluster gets.
+#
+#   docker compose up -d                  # Grafana at http://localhost:3000 (no login, this machine only), Prometheus at :9090, Loki at :3100
+#   docker compose down -v                # stop and delete the stored logs and metrics
+#
+# What the pipeline is: the demo service's stdout goes through Docker's fluentd logging driver to Fluent Bit (on a cluster Fluent Bit
+# tails the container log files instead; the parsing and the labels are the same), then to Loki. Prometheus scrapes demo-service:9464.
+# Grafana loads the SAME dashboards and alert rules as the chart (helm/dashboards, helm/alerting/rules.yaml).
+#
+# To point it at a real service instead: start the service with its own compose file, add to its service
+#     logging: { driver: fluentd, options: { fluentd-address: "127.0.0.1:24224", fluentd-async: "true", tag: chance } }
+# and to demo/prometheus.yml the target host.docker.internal:9464 (the commented job there). Stop demo-service.
+name: observability
+
+services:
+  fluent-bit:
+    image: cr.fluentbit.io/fluent/fluent-bit:5.1.3@sha256:c5542543523c9678398dd78d927c05e8425ec15b038f226b67b3b019b1a70845
+    command: ["/fluent-bit/bin/fluent-bit", "--config=/fluent-bit/etc/demo/fluent-bit.conf"]
+    ports:
+      - "127.0.0.1:24224:24224" # the Docker fluentd logging driver connects here, from the host
+    volumes:
+      - ./demo/fluent-bit.conf:/fluent-bit/etc/demo/fluent-bit.conf:ro
+    mem_limit: 96m # the chart's limit
+    depends_on:
+      - loki
+
+  loki:
+    image: docker.io/grafana/loki:3.7.9@sha256:0db216b630ae1f348a1584c67f3cead8b4c1fc839169a39501db664744158e28
+    command: ["-config.file=/etc/loki/config.yaml"]
+    ports:
+      - "127.0.0.1:3100:3100"
+    volumes:
+      - ./demo/loki.yaml:/etc/loki/config.yaml:ro
+      - loki-data:/loki
+    mem_limit: 384m # the chart's limit
+
+  prometheus:
+    image: quay.io/prometheus/prometheus:v3.16.0@sha256:9332054523223e2ddc18d8101799d54a4a8d823b030c53216f063a6c117773cd
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=1d
+      - --web.enable-lifecycle
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./demo/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    extra_hosts:
+      - "host.docker.internal:host-gateway" # to scrape a service that runs on this machine (demo/prometheus.yml)
+    mem_limit: 384m # the chart's limit
+
+  grafana:
+    image: docker.io/grafana/grafana:13.3.1-distroless@sha256:54e297ac67e2b72572f926892f4e06074dc4f79f2a56ed9a9ca9a88a46f28733
+    environment:
+      # Local only (published on 127.0.0.1): no login, everyone who reaches the port is an administrator. The cluster has no such setting:
+      # there the admin password comes from the Secret observability-env.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_LOG_MODE: console
+      GF_LOG_CONSOLE_FORMAT: json
+      GF_SMTP_ENABLED: "false" # no mail server: a notification cannot be sent, the alert still shows as Firing (README, "Alerts")
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - ./demo/grafana/datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml:ro
+      - ./demo/grafana/dashboards.yaml:/etc/grafana/provisioning/dashboards/dashboards.yaml:ro
+      - ./helm/dashboards:/var/lib/grafana/dashboards/chance:ro
+      - ./helm/alerting/rules.yaml:/etc/grafana/provisioning/alerting/rules.yaml:ro
+      - ./demo/grafana/alerting.yaml:/etc/grafana/provisioning/alerting/alerting.yaml:ro
+    mem_limit: 512m # the chart's limit (277 MiB were in use in the demo)
+    depends_on:
+      - loki
+      - prometheus
+
+  # A stand-in for one Chance service: writes pino-style JSON logs to stdout and serves /metrics with the agreed metric names.
+  demo-service:
+    image: docker.io/library/python:3.13-alpine@sha256:1e1f6334529d1fb26a2ef619d7cffb30a7c7d7cc1cc7338ebee283a58d1aeaca
+    command: ["python", "-u", "/app/server.py"]
+    environment:
+      DEMO_RATE: "8" # requests per second, all tenants together
+      DEMO_ERROR_RATE: "${DEMO_ERROR_RATE:-0.02}" # share of requests that end in a 500; DEMO_ERROR_RATE=0.3 docker compose up -d makes the error alert fire
+      DEMO_WITHDRAWAL_FAILED_EVERY: "90" # seconds between WithdrawalFailed lines; 0 = never
+    volumes:
+      - ./demo/service/server.py:/app/server.py:ro
+    ports:
+      - "127.0.0.1:9464:9464"
+    logging:
+      driver: fluentd
+      options:
+        fluentd-address: "127.0.0.1:24224"
+        fluentd-async: "true" # start even when Fluent Bit is not up yet
+        tag: demo-service
+    mem_limit: 64m
+    depends_on:
+      - fluent-bit
+
+volumes:
+  loki-data:
+  prometheus-data:

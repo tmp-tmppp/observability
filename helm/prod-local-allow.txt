@@ -1,0 +1,12 @@
+# Prod values that hold a local address on purpose (the shared pipeline's check "Prod values hold no local address").
+# One "KEY.PATH REASON" per line. Each address is a listen address or a call inside the Pod itself, never a peer service.
+fluent-bit.config.service Fluent Bit's HTTP server listens on all interfaces of its own Pod (HTTP_Listen 0.0.0.0) for its health and metrics endpoints
+loki.loki.commonConfig.compactor_grpc_address the single-binary Loki is its own compactor: the address is the same process (localhost:9095)
+grafana.imageRenderer.env.HTTP_HOST the image renderer listens on all interfaces of its own Pod (subchart default; the renderer is off)
+grafana.sidecar.alerts.reloadURL the provisioning sidecar calls the Grafana container in the same Pod (subchart default)
+grafana.sidecar.dashboards.reloadURL the provisioning sidecar calls the Grafana container in the same Pod (subchart default)
+grafana.sidecar.datasources.reloadURL the provisioning sidecar calls the Grafana container in the same Pod (subchart default)
+grafana.sidecar.notifiers.reloadURL the provisioning sidecar calls the Grafana container in the same Pod (subchart default)
+grafana.sidecar.plugins.reloadURL the provisioning sidecar calls the Grafana container in the same Pod (subchart default)
+grafana.sidecar.repositories.apiURL the provisioning sidecar calls the Grafana container in the same Pod (subchart default)
+prometheus.scrapeConfigs.prometheus.static_configs[0].targets[0] Prometheus scrapes its own metrics in its own Pod (localhost:9090)
